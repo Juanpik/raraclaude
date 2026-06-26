@@ -81,6 +81,24 @@ document.addEventListener('DOMContentLoaded', () => {
     const nextFlashcardBtn = document.getElementById('next-flashcard-btn');
     const shuffleFlashcardsBtn = document.getElementById('shuffle-flashcards-btn');
 
+    const guessSetup = document.getElementById('guess-setup');
+    const guessCategorySelect = document.getElementById('guess-category');
+    const startGuessBtn = document.getElementById('start-guess');
+    const guessDataErrorEl = document.getElementById('guess-data-error');
+    const guessGameArea = document.getElementById('guess-game-area');
+    const guessLivesEl = document.getElementById('guess-lives');
+    const guessScoreEl = document.getElementById('guess-score');
+    const guessImageContainer = document.getElementById('guess-image-container');
+    const guessSpanishWordEl = document.getElementById('guess-spanish-word');
+    const guessWordSlotsEl = document.getElementById('guess-word-slots');
+    const guessKeyboardEl = document.getElementById('guess-keyboard');
+    const guessFeedbackEl = document.getElementById('guess-feedback');
+    const guessNextBtn = document.getElementById('guess-next-btn');
+    const guessRoundEnd = document.getElementById('guess-round-end');
+    const guessRoundTitle = document.getElementById('guess-round-title');
+    const guessRoundMessage = document.getElementById('guess-round-message');
+    const guessPlayAgainBtn = document.getElementById('guess-play-again');
+
     let memoramaActive = false;
     let mCards = [];
     let mFlippedElements = [];
@@ -99,6 +117,16 @@ document.addEventListener('DOMContentLoaded', () => {
     let flashcardData = [];
     let currentFlashcardIndex = 0;
     let isFlashcardFlipped = false;
+
+    const GUESS_MAX_LIVES = 5;
+    let guessPool = [];
+    let guessCurrentWord = null;
+    let guessRevealedLetters = new Set();
+    let guessWrongLetters = new Set();
+    let guessLivesLeft = GUESS_MAX_LIVES;
+    let guessRoundScore = 0;
+    let guessActive = false;
+    const GUESS_KEYBOARD_LETTERS = ['a','b','c','d','e','g','h','i','j','k','l','m','n','o','p','r','s','t','u','w','y',"'",'á','é','í','ó','ú'];
 
     // --- "PALABRAS A REPASAR" (LocalStorage) ---
     const REPASAR_STORAGE_KEY = 'repasarLexiconIds';
@@ -222,6 +250,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (sectionId === 'memorama') resetMemoramaView();
                 else if (sectionId === 'quiz') resetQuizView();
                 else if (sectionId === 'flashcards') initializeFlashcardsView();
+                else if (sectionId === 'guess') resetGuessView();
                 if (sectionId === 'lexicon') filterAndDisplayLexicon();
             });
         });
@@ -261,7 +290,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function updateAllRepasarOptions() {
-        [quizCategorySelect, memoramaCategorySelect, flashcardCategorySelect].forEach(sel => {
+        [quizCategorySelect, memoramaCategorySelect, flashcardCategorySelect, guessCategorySelect].forEach(sel => {
             updateRepasarOptionInSelect(sel);
         });
     }
@@ -352,7 +381,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 <img src="${imgSrc}"
                      alt="${spanishText}"
                      loading="lazy"
-                     onerror="this.onerror=null; this.src='images/placeholder.png'; this.alt='Error al cargar: ${raramuriText}';"
                      class="${isRepasarItem(item.id) ? 'repasar-image-marked' : ''}"
                      title="${isRepasarItem(item.id) ? 'Quitar de repasar (clic en imagen)' : 'Marcar para repasar (clic en imagen)'}">
                 <div class="lexicon-word-container">
@@ -365,6 +393,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const imageElementInDOM = div.querySelector('img');
             if (imageElementInDOM) {
+                imageElementInDOM.addEventListener('error', function handleImgError() {
+                    this.removeEventListener('error', handleImgError);
+                    this.src = 'images/placeholder.png';
+                    this.alt = `Error al cargar: ${raramuriText}`;
+                });
                 imageElementInDOM.addEventListener('click', () => {
                     toggleRepasarItemPorImagen(item.id, imageElementInDOM);
                 });
@@ -1086,9 +1119,231 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    // --- ADIVINA LA PALABRA ---
+    function normalizeGuessChar(ch) {
+        return ch ? ch.toLowerCase() : ch;
+    }
+
+    function buildGuessPool() {
+        const selectedCategory = guessCategorySelect ? guessCategorySelect.value : 'all';
+        let items;
+        if (selectedCategory === 'repasar') {
+            items = getRepasarItems();
+        } else if (selectedCategory === 'all') {
+            items = lexiconData;
+        } else {
+            items = lexiconData.filter(item => item.category && item.category === selectedCategory);
+        }
+        return items.filter(item => item && item.id != null && item.image && item.raramuri && item.spanish);
+    }
+
+    function resetGuessView() {
+        guessActive = false;
+        guessRoundScore = 0;
+        if (guessSetup) guessSetup.style.display = 'flex';
+        if (guessGameArea) guessGameArea.hidden = true;
+        if (guessRoundEnd) guessRoundEnd.hidden = true;
+        if (guessDataErrorEl) guessDataErrorEl.hidden = true;
+        if (guessFeedbackEl) { guessFeedbackEl.textContent = ''; guessFeedbackEl.className = 'quiz-feedback'; }
+        if (guessNextBtn) guessNextBtn.hidden = true;
+        updateRepasarOptionInSelect(guessCategorySelect);
+    }
+
+    function startGuessRound() {
+        guessPool = shuffleArray(buildGuessPool());
+        if (guessPool.length === 0) {
+            const selectedCategory = guessCategorySelect ? guessCategorySelect.value : 'all';
+            const catDisplay = selectedCategory === 'all' ? 'todas las categorías' :
+                selectedCategory === 'repasar' ? "tus palabras a repasar" :
+                    `la categoría "${selectedCategory}"`;
+            if (guessDataErrorEl) {
+                guessDataErrorEl.textContent = selectedCategory === 'repasar'
+                    ? `No has marcado palabras para repasar. Ve a la sección Léxico y marca algunas haciendo clic en su imagen ⭐.`
+                    : `No hay datos disponibles para ${catDisplay}.`;
+                guessDataErrorEl.hidden = false;
+            }
+            return;
+        }
+        if (guessDataErrorEl) guessDataErrorEl.hidden = true;
+        guessRoundScore = 0;
+        if (guessSetup) guessSetup.style.display = 'none';
+        if (guessRoundEnd) guessRoundEnd.hidden = true;
+        if (guessGameArea) guessGameArea.hidden = false;
+        nextGuessWord();
+    }
+
+    function nextGuessWord() {
+        if (guessPool.length === 0) {
+            showGuessRoundEnd(true);
+            return;
+        }
+        guessCurrentWord = guessPool.pop();
+        guessRevealedLetters = new Set();
+        guessWrongLetters = new Set();
+        guessLivesLeft = GUESS_MAX_LIVES;
+        guessActive = true;
+
+        if (guessImageContainer) {
+            guessImageContainer.innerHTML = `<img src="${guessCurrentWord.image}" alt="${guessCurrentWord.spanish}" loading="lazy" onerror="this.onerror=null; this.src='images/placeholder.png';">`;
+        }
+        if (guessSpanishWordEl) guessSpanishWordEl.textContent = guessCurrentWord.spanish;
+        if (guessFeedbackEl) { guessFeedbackEl.textContent = ''; guessFeedbackEl.className = 'quiz-feedback'; }
+        if (guessNextBtn) guessNextBtn.hidden = true;
+        if (guessScoreEl) guessScoreEl.textContent = guessRoundScore;
+
+        renderGuessLives();
+        renderGuessSlots();
+        renderGuessKeyboard();
+    }
+
+    function renderGuessLives() {
+        if (!guessLivesEl) return;
+        guessLivesEl.innerHTML = '';
+        for (let i = 0; i < GUESS_MAX_LIVES; i++) {
+            const tri = document.createElement('span');
+            tri.classList.add('guess-life-triangle');
+            if (i >= guessLivesLeft) tri.classList.add('lost');
+            guessLivesEl.appendChild(tri);
+        }
+    }
+
+    function renderGuessSlots() {
+        if (!guessWordSlotsEl || !guessCurrentWord) return;
+        guessWordSlotsEl.innerHTML = '';
+        const word = guessCurrentWord.raramuri;
+        for (let i = 0; i < word.length; i++) {
+            const ch = word[i];
+            if (ch === ' ') {
+                const gap = document.createElement('div');
+                gap.classList.add('guess-slot', 'gap');
+                guessWordSlotsEl.appendChild(gap);
+                continue;
+            }
+            const slot = document.createElement('div');
+            slot.classList.add('guess-slot');
+            const normCh = normalizeGuessChar(ch);
+            if (guessRevealedLetters.has(normCh) || !/[a-záéíóú']/i.test(ch)) {
+                slot.textContent = ch;
+            }
+            guessWordSlotsEl.appendChild(slot);
+        }
+    }
+
+    function renderGuessKeyboard() {
+        if (!guessKeyboardEl) return;
+        guessKeyboardEl.innerHTML = '';
+        GUESS_KEYBOARD_LETTERS.forEach(letter => {
+            const btn = document.createElement('button');
+            btn.classList.add('guess-key');
+            btn.textContent = letter;
+            btn.dataset.letter = letter;
+            if (guessRevealedLetters.has(letter)) { btn.classList.add('correct'); btn.disabled = true; }
+            if (guessWrongLetters.has(letter)) { btn.classList.add('incorrect'); btn.disabled = true; }
+            btn.addEventListener('click', () => handleGuessLetter(letter));
+            guessKeyboardEl.appendChild(btn);
+        });
+    }
+
+    function handleGuessLetter(letter) {
+        if (!guessActive || !guessCurrentWord) return;
+        const wordLower = guessCurrentWord.raramuri.toLowerCase();
+        if (guessRevealedLetters.has(letter) || guessWrongLetters.has(letter)) return;
+
+        if (wordLower.includes(letter)) {
+            guessRevealedLetters.add(letter);
+            renderGuessSlots();
+            renderGuessKeyboard();
+            checkGuessWordComplete();
+        } else {
+            guessWrongLetters.add(letter);
+            guessLivesLeft--;
+            renderGuessLives();
+            renderGuessKeyboard();
+            if (guessLivesLeft <= 0) {
+                handleGuessWordFailed();
+            }
+        }
+    }
+
+    function checkGuessWordComplete() {
+        const word = guessCurrentWord.raramuri.toLowerCase();
+        const lettersOnly = word.split('').filter(ch => /[a-záéíóú']/i.test(ch));
+        const allRevealed = lettersOnly.every(ch => guessRevealedLetters.has(ch));
+        if (allRevealed) {
+            guessActive = false;
+            guessRoundScore++;
+            if (guessScoreEl) guessScoreEl.textContent = guessRoundScore;
+            if (guessFeedbackEl) { guessFeedbackEl.textContent = '¡Muy bien! Completaste la palabra.'; guessFeedbackEl.className = 'quiz-feedback correct'; }
+            revealFullGuessWord();
+            if (guessNextBtn) guessNextBtn.hidden = false;
+        }
+    }
+
+    function handleGuessWordFailed() {
+        guessActive = false;
+        if (guessFeedbackEl) {
+            guessFeedbackEl.innerHTML = `Sin intentos. La palabra era: <strong lang="rar">${guessCurrentWord.raramuri}</strong>`;
+            guessFeedbackEl.className = 'quiz-feedback incorrect';
+        }
+        revealFullGuessWord();
+        disableGuessKeyboard();
+        if (guessNextBtn) guessNextBtn.hidden = false;
+    }
+
+    function revealFullGuessWord() {
+        if (!guessWordSlotsEl || !guessCurrentWord) return;
+        guessWordSlotsEl.innerHTML = '';
+        const word = guessCurrentWord.raramuri;
+        for (let i = 0; i < word.length; i++) {
+            const ch = word[i];
+            if (ch === ' ') {
+                const gap = document.createElement('div');
+                gap.classList.add('guess-slot', 'gap');
+                guessWordSlotsEl.appendChild(gap);
+                continue;
+            }
+            const slot = document.createElement('div');
+            slot.classList.add('guess-slot', 'revealed');
+            slot.textContent = ch;
+            guessWordSlotsEl.appendChild(slot);
+        }
+        disableGuessKeyboard();
+    }
+
+    function disableGuessKeyboard() {
+        if (!guessKeyboardEl) return;
+        guessKeyboardEl.querySelectorAll('.guess-key').forEach(btn => btn.disabled = true);
+    }
+
+    function showGuessRoundEnd(finishedAll) {
+        if (guessGameArea) guessGameArea.hidden = true;
+        if (guessRoundEnd) guessRoundEnd.hidden = false;
+        if (guessRoundTitle) guessRoundTitle.textContent = finishedAll ? '¡Terminaste la ronda!' : 'Ronda terminada';
+        if (guessRoundMessage) guessRoundMessage.textContent = `Adivinaste ${guessRoundScore} palabra${guessRoundScore === 1 ? '' : 's'} en esta ronda.`;
+    }
+
+    function setupGuessControls() {
+        if (!startGuessBtn || !guessNextBtn || !guessPlayAgainBtn || !guessCategorySelect) return;
+        startGuessBtn.addEventListener('click', startGuessRound);
+        guessNextBtn.addEventListener('click', nextGuessWord);
+        guessPlayAgainBtn.addEventListener('click', resetGuessView);
+        guessCategorySelect.addEventListener('change', () => {
+            if (guessDataErrorEl) guessDataErrorEl.hidden = true;
+        });
+        document.addEventListener('keydown', (e) => {
+            const guessSection = document.getElementById('guess');
+            if (!guessSection || !guessSection.classList.contains('active')) return;
+            if (!guessActive) return;
+            const key = e.key.toLowerCase();
+            if (GUESS_KEYBOARD_LETTERS.includes(key)) {
+                handleGuessLetter(key);
+            }
+        });
+    }
+
     // --- INICIALIZACIÓN GENERAL ---
     function initializeApplication() {
-        if (!mainContentEl || !navButtons || !contentSections || !lexiconGrid || !phrasesList || !memoramaGrid || !quizContainer || !flashcardsContainer || !categoryFiltersContainer || !quizCategorySelect || !flashcardCategorySelect || !memoramaCategorySelect || !flashcardsSetupControls || !flashcardsDataErrorEl || !quizDataErrorEl) {
+        if (!mainContentEl || !navButtons || !contentSections || !lexiconGrid || !phrasesList || !memoramaGrid || !quizContainer || !flashcardsContainer || !categoryFiltersContainer || !quizCategorySelect || !flashcardCategorySelect || !memoramaCategorySelect || !guessCategorySelect || !flashcardsSetupControls || !flashcardsDataErrorEl || !quizDataErrorEl) {
             if (errorMessageEl) { errorMessageEl.textContent = "Error crítico al iniciar: elementos faltantes. Consulta la consola."; errorMessageEl.style.display = 'block'; }
             if (loadingMessageEl) loadingMessageEl.style.display = 'none';
             if (mainContentEl) mainContentEl.hidden = true;
@@ -1105,8 +1360,9 @@ document.addEventListener('DOMContentLoaded', () => {
             populateCategorySelect(quizCategorySelect, uniqueCategories);
             populateCategorySelect(flashcardCategorySelect, uniqueCategories);
             populateCategorySelect(memoramaCategorySelect, uniqueCategories);
+            populateCategorySelect(guessCategorySelect, uniqueCategories);
 
-            [quizCategorySelect, flashcardCategorySelect, memoramaCategorySelect].forEach(sel => {
+            [quizCategorySelect, flashcardCategorySelect, memoramaCategorySelect, guessCategorySelect].forEach(sel => {
                 if (sel) {
                     const nonRepasarOptionsCount = Array.from(sel.options).filter(opt => opt.value !== 'repasar').length;
                     sel.disabled = nonRepasarOptionsCount <= 1 && repasarLexiconIds.length === 0;
@@ -1114,7 +1370,7 @@ document.addEventListener('DOMContentLoaded', () => {
             });
 
         } else {
-            [quizCategorySelect, flashcardCategorySelect, memoramaCategorySelect].forEach(sel => {
+            [quizCategorySelect, flashcardCategorySelect, memoramaCategorySelect, guessCategorySelect].forEach(sel => {
                 if (sel) sel.disabled = true;
             });
 
@@ -1122,11 +1378,13 @@ document.addEventListener('DOMContentLoaded', () => {
             if (flashcardsDataErrorEl && flashcardsSetupControls) { flashcardsSetupControls.style.display = 'flex'; flashcardsDataErrorEl.textContent = noDataMsg; flashcardsDataErrorEl.hidden = false; if (flashcardAreaEl) flashcardAreaEl.hidden = true; }
             if (quizDataErrorEl && quizSetup) { quizSetup.style.display = 'flex'; quizDataErrorEl.textContent = noDataMsg; quizDataErrorEl.hidden = false; if (quizQuestionArea) quizQuestionArea.hidden = true; if (quizResultsEl) quizResultsEl.hidden = true; }
             if (memoramaDataErrorEl && memoramaSetup) { memoramaSetup.style.display = 'flex'; memoramaDataErrorEl.textContent = noDataMsg; memoramaDataErrorEl.hidden = false; if (memoramaGameArea) memoramaGameArea.hidden = true; }
+            if (guessDataErrorEl && guessSetup) { guessSetup.style.display = 'flex'; guessDataErrorEl.textContent = noDataMsg; guessDataErrorEl.hidden = false; if (guessGameArea) guessGameArea.hidden = true; }
         }
 
         setupMemoramaControls();
         setupQuizControls();
         setupFlashcardsControls();
+        setupGuessControls();
 
         updateAllRepasarOptions();
         filterAndDisplayLexicon();
